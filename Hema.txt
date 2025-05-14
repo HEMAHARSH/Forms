@@ -1,0 +1,117 @@
+import psycopg2
+import cx_Oracle
+import pyodbc
+
+
+class DBConnector:
+    @staticmethod
+    def connect_postgresql(config):
+        return psycopg2.connect(
+            host=config['db_host'],
+            database=config['db_name'],
+            user=config['db_username'],
+            password=config['db_password']
+        )
+
+    @staticmethod
+    def connect_oracle(config):
+        return cx_Oracle.connect(
+            f"{config['db_username']}/{config['db_password']}@{config['db_host']}/{config['db_name']}"
+        )
+
+    @staticmethod
+    def connect_mssql(config):
+        conn_str = (
+            f"DRIVER={{ODBC Driver 18 for SQL Server}};"
+            f"SERVER={config['db_host']};"
+            f"DATABASE={config['db_name']};"
+            f"UID={config['db_username']};"
+            f"PWD={config['db_password']};"
+            f"TrustServerCertificate=yes;"
+            f"Encrypt=no;"
+        )
+        return pyodbc.connect(conn_str)
+
+
+class DBCheck:
+    def __init__(self, config):
+        self.config = config
+        self.conn = None
+        self.cur = None
+
+        self.db_connect_dispatcher = {
+            'postgresql': DBConnector.connect_postgresql,
+            'oracle': DBConnector.connect_oracle,
+            'mssql': DBConnector.connect_mssql
+        }
+
+    def connect(self):
+        db_type = self.config.get('db_type', '').lower()
+        connect_func = self.db_connect_dispatcher.get(db_type)
+
+        if not connect_func:
+            print(f"Unsupported database type: {db_type}")
+            return
+
+        try:
+            self.conn = connect_func(self.config)
+            self.cur = self.conn.cursor()
+        except Exception as e:
+            print(f"DB connection failed for {db_type}: {e}")
+            self.conn = None
+            self.cur = None
+
+    def execute_query(self, query):
+        try:
+            self.cur.execute(query)
+            return self.cur.fetchall()
+        except Exception as e:
+            print(f"Error executing the query: {e}")
+            return None
+
+    def close_connection(self):
+        if self.cur:
+            self.cur.close()
+        if self.conn:
+            self.conn.close()
+
+    def report_count(self, actual, expected):
+        if expected is not None:
+            if actual == expected:
+                print(f"Row count matches: Expected = {expected}, Actual = {actual}")
+            elif actual < expected:
+                print(f"Row count LESS than expected: Expected = {expected}, Actual = {actual}")
+            else:
+                print(f"Row count GREATER than expected: Expected = {expected}, Actual = {actual}")
+
+
+def handle_db_check(config):
+    db_check = DBCheck(config)
+    db_check.connect()
+
+    if db_check.cur is None:
+        print(f"Skipping db {config['db_type']} due to failed connection")
+        return
+
+    queries = config.get("query", [])
+    expected_count = config.get("count")
+
+    if isinstance(queries, list):
+        for query in queries:
+            print(f"Query: {query}")
+            rows = db_check.execute_query(query)
+            if rows is not None:
+                for row in rows:
+                    print(row)
+                db_check.report_count(len(rows), expected_count)
+                print()
+    else:
+        print(f"Query: {queries}")
+        rows = db_check.execute_query(queries)
+        if rows:
+            for row in rows:
+                print(row)
+            db_check.report_count(len(rows), expected_count)
+            print()
+
+    db_check.close_connection()
