@@ -1,157 +1,13 @@
-import json
-import psycopg2
-import cx_Oracle
 import xml.etree.ElementTree as ET
-from lookupPlugins.getCred import Lookup
-
-
-class DBConnector:
-    @staticmethod
-    def connect_postgresql(config):
-        username = DBConnector.fetch_credential(config, "username")
-        password = DBConnector.fetch_credential(config, "password")
-        return psycopg2.connect(
-            host=config['db_host'],
-            database=config['db_name'],
-            user=username,
-            password=password
-        )
-
-    @staticmethod
-    def connect_oracle(config):
-        username = DBConnector.fetch_credential(config, "username")
-        password = DBConnector.fetch_credential(config, "password")
-        dsn = f"{config['db_host']}/{config['db_name']}"
-        return cx_Oracle.connect(username, password, dsn)
-
-    @staticmethod
-    def fetch_credential(config, field):
-        credsdata = config.get("credsdata")
-        if credsdata and all(k in credsdata for k in ['credential', 'safe', 'appid', 'cyberark_ca', 'cyberark_cred', 'cyberark_key']):
-            return Lookup.getCreds(
-                field,
-                credsdata['credential'],
-                credsdata['safe'],
-                credsdata['appid'],
-                credsdata['cyberark_ca'],
-                credsdata['cyberark_cred'],
-                credsdata['cyberark_key']
-            ).decode()
-        return None
-
-
-class DBCheck:
-    def __init__(self, config):
-        self.config = config
-        self.conn = None
-        self.cur = None
-        self.db_connect_dispatcher = {
-            'postgresql': DBConnector.connect_postgresql,
-            'oracle': DBConnector.connect_oracle
-        }
-
-    def connect(self):
-        db_type = self.config.get('db_type', '').lower()
-        connect_func = self.db_connect_dispatcher.get(db_type)
-        if not connect_func:
-            print(f"Unsupported database type: {db_type}")
-            return
-        try:
-            self.conn = connect_func(self.config)
-            self.cur = self.conn.cursor()
-        except Exception as e:
-            print(f"DB connection failed for {db_type}: {e}")
-            self.conn = None
-            self.cur = None
-
-    def execute_query(self, query):
-        try:
-            self.cur.execute(query)
-            return self.cur.fetchall()
-        except Exception as e:
-            print(f"Error executing query: {e}")
-            return None
-
-    def close_connection(self):
-        if self.cur:
-            self.cur.close()
-        if self.conn:
-            self.conn.close()
-
-
-class CompareOutput:
-    def __init__(self):
-        self.operator_map = {
-            ">": self.greater,
-            "<": self.lesser,
-            "==": self.equal,
-            ">=": self.greater_equal,
-            "<=": self.lesser_equal
-        }
-
-    def greater(self, output, value):
-        return output > value, f"Database row count is {output} and greater than {value}"
-
-    def lesser(self, output, value):
-        return output < value, f"Database row count is {output} and less than {value}"
-
-    def equal(self, output, value):
-        return output == value, f"Database row count is {output} and equal to {value}"
-
-    def greater_equal(self, output, value):
-        return output >= value, f"Database row count is {output} and greater than or equal to {value}"
-
-    def lesser_equal(self, output, value):
-        return output <= value, f"Database row count is {output} and less than or equal to {value}"
-
-    def compare_and_generate(self, output, count_expr):
-        if count_expr is None:
-            return {
-                "output": output,
-                "status": "Success",
-                "message": "No count condition provided"
-            }
-
-        parts = count_expr.strip().split()
-        if len(parts) != 2:
-            return {
-                "output": output,
-                "status": "Failure",
-                "message": "Invalid count expression format"
-            }
-
-        operator, value_str = parts
-        try:
-            value = int(value_str)
-        except ValueError:
-            return {
-                "output": output,
-                "status": "Failure",
-                "message": f"Invalid value for comparison: {value_str}"
-            }
-
-        func = self.operator_map.get(operator)
-        if not func:
-            return {
-                "output": output,
-                "status": "Failure",
-                "message": f"Unsupported operator: {operator}"
-            }
-
-        success, message = func(output, value)
-        return {
-            "output": output,
-            "status": "Success" if success else "Failure",
-            "message": message
-        }
-
+from xml.dom import minidom
 
 class Output:
     def generate_json_report(self, all_results, config):
         report = {"report": {"checks": all_results}}
-        with open("report.json", "w") as f:
+        report_file = "report.json"
+        with open(report_file, "w") as f:
             json.dump(report, f, indent=4)
-        print("Report saved to report.json")
+        print(f"Report saved to {report_file}")
 
     def generate_xml_report(self, all_results, config):
         root = ET.Element("report")
@@ -161,6 +17,7 @@ class Output:
             check = ET.SubElement(checks, "check")
             ET.SubElement(check, "type").text = result.get("type")
             ET.SubElement(check, "db_type").text = result.get("db_type")
+
             results = ET.SubElement(check, "results")
             for res in result.get("results", []):
                 result_element = ET.SubElement(results, "result")
@@ -168,132 +25,12 @@ class Output:
                 ET.SubElement(result_element, "status").text = res.get("status")
                 ET.SubElement(result_element, "message").text = res.get("message")
 
-        tree = ET.ElementTree(root)
-        tree.write("report.xml", encoding="utf-8", xml_declaration=True)
-        print("Report saved to report.xml")
+        # Pretty-print the XML
+        xml_str = ET.tostring(root, encoding="utf-8")
+        pretty_xml = minidom.parseString(xml_str).toprettyxml(indent="  ")
 
+        report_file = "report.xml"
+        with open(report_file, "w", encoding="utf-8") as f:
+            f.write(pretty_xml)
 
-def handle_db_check(config):
-    db_results = []
-    db_type = config.get("db_type")
-    db_check = DBCheck(config)
-    db_check.connect()
-
-    if db_check.cur is None:
-        return {
-            "type": "DBCheck",
-            "db_type": db_type,
-            "results": [{
-                "status": "Failure",
-                "message": f"Skipping DB [{db_type}] due to failed connection"
-            }]
-        }
-
-    queries = config.get("queries", [])
-    if not isinstance(queries, list):
-        db_check.close_connection()
-        return {
-            "type": "DBCheck",
-            "db_type": db_type,
-            "results": [{
-                "status": "Failure",
-                "message": "Invalid queries configuration"
-            }]
-        }
-
-    for query_config in queries:
-        if not isinstance(query_config, dict) or 'query' not in query_config:
-            db_results.append({
-                "status": "Failure",
-                "message": "Invalid query configuration",
-                "db_type": db_type
-            })
-            continue
-
-        query = query_config['query']
-        condition = query_config.get("condition")
-
-        try:
-            rows = db_check.execute_query(query)
-            if rows:
-                output = rows[0][0]
-                result = CompareOutput().compare_and_generate(output, condition)
-                result["query"] = query
-                result["db_type"] = db_type
-            else:
-                result = {
-                    "status": "Failure",
-                    "message": "Query returned no data",
-                    "query": query,
-                    "db_type": db_type
-                }
-            db_results.append(result)
-        except Exception as e:
-            db_results.append({
-                "status": "Failure",
-                "message": f"Error executing query: {str(e)}",
-                "query": query,
-                "db_type": db_type
-            })
-
-    db_check.close_connection()
-
-    return {
-        "type": "DBCheck",
-        "db_type": db_type,
-        "results": db_results
-    }
-
-
-import json
-import os
-import yaml
-from scripts.dbchecks import handle_db_check, Output
-
-def load_yaml(path):
-    try:
-        with open(path, "r") as file:
-            return yaml.safe_load(file)
-    except FileNotFoundError:
-        print("The YAML file was not found.")
-        return None
-
-def dispatch_check(check):
-    check_type = check.get("type")
-    check_handlers = {
-        "DBCheck": handle_db_check
-    }
-
-    handler = check_handlers.get(check_type)
-    if handler:
-        return handler(check)
-    else:
-        print(f"Unsupported check type: {check_type}")
-        return None
-
-def main():
-    config = load_yaml("config.yaml")
-    if not config:
-        return
-
-    app_config = config.get("application", {})
-    checks = app_config.get("checks", [])
-
-    all_results = []
-    for check in checks:
-        result = dispatch_check(check)
-        if result:
-            all_results.append(result)
-
-    report_type = app_config.get("report", {}).get("format", "json").lower()
-    generate_report = app_config.get("report", {}).get("generateReport", True)
-
-    if generate_report:
-        reporter = Output()
-        if report_type == "xml":
-            reporter.generate_xml_report(all_results, config)
-        else:
-            reporter.generate_json_report(all_results, config)
-
-if __name__ == "__main__":
-    main()
+        print(f"Report saved to {report_file}")
