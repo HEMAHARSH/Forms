@@ -1,86 +1,150 @@
-import os import json import xml.etree.ElementTree as ET
+import requests
+from lxml import html
+import os
+import json
+import xml.etree.ElementTree as ET
 
-class Output: def generate_json_report(self, all_results, report_file="report.json"): if os.path.exists(report_file): with open(report_file, "r") as f: try: existing_report = json.load(f) except json.JSONDecodeError: existing_report = {"report": {"checks": []}} else: existing_report = {"report": {"checks": []}}
+class URLChecker:
+    def __init__(self, config):
+        self.config = config
 
-existing_report["report"]["checks"].append(all_results)
+    def run(self):
+        url = self.config.get("url")
+        expected_status = self.config.get("status_code")
+        verify = self.config.get("verify", False)
+        username = self.fetch_credential(self.config, "username")
+        password = self.fetch_credential(self.config, "password")
+        xpath = self.config.get("xpath", None)
 
-    with open(report_file, "w") as f:
-        json.dump(existing_report, f, indent=4)
-
-    print(f"Report saved to {report_file}")
-
-def generate_xml_report(self, all_results, report_file="report.xml"):
-    if os.path.exists(report_file):
-        tree = ET.parse(report_file)
-        root = tree.getroot()
-    else:
-        root = ET.Element("report")
-        tree = ET.ElementTree(root)
-
-    check_element = ET.SubElement(root, "check")
-    ET.SubElement(check_element, "type").text = all_results.get("type")
-    results = ET.SubElement(check_element, "results")
-
-    for res in all_results.get("results", []):
-        result_element = ET.SubElement(results, "result")
-        for k, v in res.items():
-            ET.SubElement(result_element, k).text = str(v)
-
-    tree.write(report_file, encoding="utf-8", xml_declaration=True)
-    print(f"Report saved to {report_file}")
-
-def handle_url_check(config, report_format="json", generate_report=True): from urlchecker import URLChecker  # If URLChecker is in the same file, remove this line
-
-checker = URLChecker(config)
-results = checker.run()
-output = []
-
-for res in results:
-    result = {
-        "url": f"{res['url']}",
-        "expected": f"{res.get('expected')} | Status: {res.get('status', 'N/A')}",
-        "success": f"{res['success']}",
-        "message": f"{res['message']}"
-    }
-
-    if 'xpath_valid' in res and res['xpath_valid'] is not None:
-        result["xpath_valid"] = f"{res['xpath_valid']}, Xpath locates the element"
-    elif 'xpath_valid' in res and res['xpath_valid'] is None:
-        result["xpath_check"] = "Not performed (no XPath provided)"
-    else:
-        result["xpath_check"] = "Not performed (error occurred)"
-
-    if 'xpath_element' in res and res['xpath_element'] is not None:
-        xpath_value = res['xpath_element']
-        if isinstance(xpath_value, dict):
-            result["element_tag_name"] = f"{xpath_value['element_name']}"
-            result["element_value"] = f"{xpath_value['element_html']}"
-            if 'value' in config and config['value'] is not None:
-                result["expected_xpath_value"] = f"{config['value']}"
-                if config['value'] in xpath_value['element_html']:
-                    result["xpath_value_match"] = f"Success: Xpath Value Matched -> {config['value']}"
-                else:
-                    result["xpath_value_match"] = f"Failure: Xpath element value retrieved -> {xpath_value['element_html']}"
+        if username and password:
+            return [self._check_with_auth(url, expected_status, username, password, verify, xpath)]
         else:
-            result["xpath_element"] = f"XPath Element: {xpath_value}"
-    elif 'xpath_element' in res and res['xpath_element'] is None:
-        result["xpath_element"] = "XPath Element: Not found (no XPath provided or element not found)"
-    else:
-        result["xpath_element"] = "XPath Element: Not available (error occurred)"
+            return [self._check(url, expected_status, verify, xpath)]
 
-    output.append(result)
+    def check_xpath(self, response, xpath):
+        try:
+            tree = html.fromstring(response.content)
+            element = tree.xpath(xpath)
+            if element:
+                element_name = element[0].tag
+                element_html = element[0].text_content()
+                return {
+                    'element_name': element_name,
+                    'element_html': element_html
+                }
+            else:
+                return "Element not found"
+        except Exception as e:
+            return f"Invalid XPath expression: {e}"
 
-all_results = {
-    "type": "URLCheck",
-    "results": output
-}
+    def _check(self, url, status_code, verify=False, xpath=None):
+        return self.perform_check(url, status_code, auth=None, verify=verify, xpath=xpath)
 
-if generate_report:
-    reporter = Output()
-    if report_format == "xml":
-        reporter.generate_xml_report(all_results)
-    else:
-        reporter.generate_json_report(all_results)
+    def _check_with_auth(self, url, status_code, username, password, verify=False, xpath=None):
+        return self.perform_check(url, status_code, auth=(username, password), verify=verify, xpath=xpath)
 
-return all_results
+    def perform_check(self, url, status_code, auth=None, verify=False, xpath=None):
+        try:
+            response = requests.get(url, timeout=5, verify=verify, auth=auth, allow_redirects=False)
+            status = response.status_code
+            success = status == status_code
+            message = "URL is working" if success else f"URL returned {status}, expected {status_code}"
+            xpath_valid = self.check_xpath(response, xpath) if xpath else None
+            return {
+                "url": url,
+                "status": status,
+                "expected": status_code,
+                "success": success,
+                "message": message,
+                "xpath_valid": xpath_valid
+            }
+        except requests.ConnectionError:
+            return {"url": url, "success": False, "message": "URL not reachable"}
+        except requests.Timeout:
+            return {"url": url, "success": False, "message": "Timeout"}
+        except requests.RequestException as e:
+            return {"url": url, "success": False, "message": f"Failed due to {str(e)}"}
 
+    @staticmethod
+    def fetch_credential(config, field):
+        if 'credsdata' in config:
+            credsdata = config['credsdata']
+            if all(k in credsdata for k in ['credential', 'safe', 'appid', 'cyberark_ca', 'cyberark_cred', 'cyberark_key']):
+                return Lookup.getCreds(field, credsdata['credential'], credsdata['safe'], credsdata['appid'], credsdata['cyberark_ca'], credsdata['cyberark_cred'], credsdata['cyberark_key'])
+        return None
+
+
+class Output:
+    def generate_json_report(self, all_results, report_file="report.json"):
+        if os.path.exists(report_file):
+            with open(report_file, "r") as f:
+                try:
+                    existing_report = json.load(f)
+                except json.JSONDecodeError:
+                    existing_report = {"report": {"checks": []}}
+        else:
+            existing_report = {"report": {"checks": []}}
+
+        existing_report["report"]["checks"].append(all_results)
+
+        with open(report_file, "w") as f:
+            json.dump(existing_report, f, indent=4)
+        print(f"Report saved to {report_file}")
+
+    def generate_xml_report(self, all_results, report_file="report.xml"):
+        if os.path.exists(report_file):
+            tree = ET.parse(report_file)
+            root = tree.getroot()
+        else:
+            root = ET.Element("report")
+            tree = ET.ElementTree(root)
+
+        check_element = ET.SubElement(root, "check")
+        ET.SubElement(check_element, "type").text = all_results.get("type")
+        results_element = ET.SubElement(check_element, "results")
+
+        for res in all_results.get("results", []):
+            result_element = ET.SubElement(results_element, "result")
+            for k, v in res.items():
+                ET.SubElement(result_element, k).text = str(v)
+
+        tree.write(report_file, encoding="utf-8", xml_declaration=True)
+        print(f"Report saved to {report_file}")
+
+
+def handle_url_check(config):
+    checker = URLChecker(config)
+    results = checker.run()
+    output = []
+
+    for res in results:
+        result = {
+            "url": res.get("url"),
+            "expected": f"{res.get('expected')} | Status: {res.get('status', 'N/A')}",
+            "success": str(res.get("success")),
+            "message": res.get("message")
+        }
+
+        xpath_valid = res.get("xpath_valid")
+        if isinstance(xpath_valid, dict):
+            result["xpath_valid"] = "XPath located the element"
+            result["element_tag_name"] = xpath_valid.get("element_name")
+            result["element_value"] = xpath_valid.get("element_html")
+            if config.get("value"):
+                result["expected_xpath_value"] = config["value"]
+                result["xpath_value_match"] = (
+                    f"Success: XPath value matched -> {config['value']}"
+                    if config["value"] in xpath_valid.get("element_html", "")
+                    else f"Failure: XPath value mismatch -> {xpath_valid.get('element_html', '')}"
+                )
+        elif xpath_valid is None:
+            result["xpath_check"] = "Not performed (no XPath provided)"
+        else:
+            result["xpath_element"] = xpath_valid  # Could be error message or "Element not found"
+
+        output.append(result)
+
+    return {
+        "type": "URL.Check",
+        "results": output
+    }
