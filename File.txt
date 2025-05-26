@@ -42,6 +42,7 @@ def generate_json_report():
         for res in check.get("results", []):
             summary.append({
                 "type": check.get("type"),
+                "db_type": check.get("db_type", "unknown"),
                 "query": res.get("query", "N/A"),
                 "status": res.get("status"),
                 "message": res.get("message")
@@ -56,17 +57,18 @@ def main():
     if not config:
         return
 
-    checks = config.get("application", {}).get("checks", [])
+    app_config = config.get("application", {})
+    checks = app_config.get("checks", [])
+
     for check in checks:
         dispatch_check(check)
 
-    report_type = config.get("application", {}).get("report", "").lower()
-    if report_type == "json":
+    report_cfg = app_config.get("report", {})
+    if report_cfg.get("generateReport", False) and report_cfg.get("format", "").lower() == "json":
         generate_json_report()
 
 if __name__ == "__main__":
     main()
-
 
 
 
@@ -127,7 +129,6 @@ class DBCheck:
     def connect(self):
         db_type = self.config.get('db_type', '').lower()
         connect_func = self.db_connect_dispatcher.get(db_type)
-
         if not connect_func:
             print(f"Unsupported database type: {db_type}")
             return
@@ -164,20 +165,11 @@ class JsonOutput:
             "<=": self._lesser_equal
         }
 
-    def _greater(self, output, value):
-        return output > value, f"Database row count is {output} and greater than {value}"
-
-    def _lesser(self, output, value):
-        return output < value, f"Database row count is {output} and less than {value}"
-
-    def _equal(self, output, value):
-        return output == value, f"Database row count is {output} and equal to {value}"
-
-    def _greater_equal(self, output, value):
-        return output >= value, f"Database row count is {output} and greater than or equal to {value}"
-
-    def _lesser_equal(self, output, value):
-        return output <= value, f"Database row count is {output} and less than or equal to {value}"
+    def _greater(self, output, value): return output > value, f"{output} > {value}"
+    def _lesser(self, output, value): return output < value, f"{output} < {value}"
+    def _equal(self, output, value): return output == value, f"{output} == {value}"
+    def _greater_equal(self, output, value): return output >= value, f"{output} >= {value}"
+    def _lesser_equal(self, output, value): return output <= value, f"{output} <= {value}"
 
     def compare_and_generate(self, output, count_expr):
         if count_expr is None:
@@ -231,13 +223,15 @@ def handle_db_check(config):
         all_results = []
 
     db_results = []
+    db_type = config.get("db_type", "unknown")
+
     db_check = DBCheck(config)
     db_check.connect()
 
     if db_check.cur is None:
         db_results.append({
             "status": "Failure",
-            "message": f"Skipping DB [{config.get('db_type')}] due to failed connection"
+            "message": f"Skipping DB [{db_type}] due to failed connection"
         })
     else:
         queries = config.get("queries", [])
@@ -274,6 +268,7 @@ def handle_db_check(config):
 
     all_results.append({
         "type": "DBCheck",
+        "db_type": db_type,
         "results": db_results
     })
 
