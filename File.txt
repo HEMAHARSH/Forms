@@ -1,84 +1,9 @@
-import yaml
-import json
-import os
-from scripts.dbchecks import handle_db_check
-
-OUTPUT_FILE = "output.json"
-REPORT_FILE = "report.json"
-
-def load_yaml(path):
-    try:
-        with open(path, "r") as file:
-            return yaml.safe_load(file)
-    except FileNotFoundError:
-        print("The YAML file was not found.")
-        return None
-
-def dispatch_check(check):
-    check_type = check.get("type")
-    check_handlers = {
-        "DBCheck": handle_db_check,
-    }
-    handler = check_handlers.get(check_type)
-    if handler:
-        handler(check)
-    else:
-        print(f"Unsupported check type: {check_type}")
-
-def generate_json_report():
-    if not os.path.exists(OUTPUT_FILE):
-        print("No output.json file found.")
-        return
-
-    with open(OUTPUT_FILE, "r") as f:
-        try:
-            results = json.load(f)
-        except json.JSONDecodeError:
-            print("Invalid JSON format in output.json.")
-            return
-
-    summary = []
-    for check in results:
-        for res in check.get("results", []):
-            summary.append({
-                "type": check.get("type"),
-                "db_type": check.get("db_type", "unknown"),
-                "query": res.get("query", "N/A"),
-                "status": res.get("status"),
-                "message": res.get("message")
-            })
-
-    with open(REPORT_FILE, "w") as f:
-        json.dump(summary, f, indent=4)
-    print(f"Report saved to {REPORT_FILE}")
-
-def main():
-    config = load_yaml("config.yaml")
-    if not config:
-        return
-
-    app_config = config.get("application", {})
-    checks = app_config.get("checks", [])
-
-    for check in checks:
-        dispatch_check(check)
-
-    report_cfg = app_config.get("report", {})
-    if report_cfg.get("generateReport", False) and report_cfg.get("format", "").lower() == "json":
-        generate_json_report()
-
-if __name__ == "__main__":
-    main()
-
-
-
 import os
 import json
 import psycopg2
 import cx_Oracle
+import xml.etree.ElementTree as ET
 from lookupPlugins.getCred import Lookup
-
-OUTPUT_FILE = "output.json"
 
 class DBConnector:
     @staticmethod
@@ -102,9 +27,7 @@ class DBConnector:
     @staticmethod
     def fetch_credential(config, field):
         credsdata = config.get("credsdata")
-        if credsdata and all(k in credsdata for k in [
-            'credential', 'safe', 'appid', 'cyberark_ca',
-            'cyberark_cred', 'cyberark_key']):
+        if credsdata and all(k in credsdata for k in ['credential', 'safe', 'appid', 'cyberark_ca', 'cyberark_cred', 'cyberark_key']):
             return Lookup.getCreds(
                 field,
                 credsdata['credential'],
@@ -113,8 +36,9 @@ class DBConnector:
                 credsdata['cyberark_ca'],
                 credsdata['cyberark_cred'],
                 credsdata['cyberark_key']
-            )
+            ).decode()
         return None
+
 
 class DBCheck:
     def __init__(self, config):
@@ -132,7 +56,6 @@ class DBCheck:
         if not connect_func:
             print(f"Unsupported database type: {db_type}")
             return
-
         try:
             self.conn = connect_func(self.config)
             self.cur = self.conn.cursor()
@@ -155,31 +78,41 @@ class DBCheck:
         if self.conn:
             self.conn.close()
 
-class JsonOutput:
+
+class CompareOutput:
     def __init__(self):
         self.operator_map = {
-            ">": self._greater,
-            "<": self._lesser,
-            "==": self._equal,
-            ">=": self._greater_equal,
-            "<=": self._lesser_equal
+            ">": self.greater,
+            "<": self.lesser,
+            "==": self.equal,
+            ">=": self.greater_equal,
+            "<=": self.lesser_equal
         }
 
-    def _greater(self, output, value): return output > value, f"{output} > {value}"
-    def _lesser(self, output, value): return output < value, f"{output} < {value}"
-    def _equal(self, output, value): return output == value, f"{output} == {value}"
-    def _greater_equal(self, output, value): return output >= value, f"{output} >= {value}"
-    def _lesser_equal(self, output, value): return output <= value, f"{output} <= {value}"
+    def greater(self, output, value):
+        return output > value, f"Database row count is {output} and greater than {value}"
+
+    def lesser(self, output, value):
+        return output < value, f"Database row count is {output} and less than {value}"
+
+    def equal(self, output, value):
+        return output == value, f"Database row count is {output} and equal to {value}"
+
+    def greater_equal(self, output, value):
+        return output >= value, f"Database row count is {output} and greater than or equal to {value}"
+
+    def lesser_equal(self, output, value):
+        return output <= value, f"Database row count is {output} and less than or equal to {value}"
 
     def compare_and_generate(self, output, count_expr):
-        if count_expr is None:
+        if not count_expr:
             return {
                 "output": output,
                 "status": "Success",
                 "message": "No count condition provided"
             }
 
-        parts = count_expr.split()
+        parts = count_expr.strip().split()
         if len(parts) != 2:
             return {
                 "output": output,
@@ -212,65 +145,112 @@ class JsonOutput:
             "message": message
         }
 
+
+class Output:
+    def generate_json_report(self, all_results, config):
+        report = {
+            "report": {
+                "checks": all_results
+            }
+        }
+        report_file = "report.json"
+        with open(report_file, "w") as f:
+            json.dump(report, f, indent=4)
+        print(f"Report saved to {report_file}")
+
+    def generate_xml_report(self, all_results, config):
+        root = ET.Element("report")
+        checks = ET.SubElement(root, "checks")
+        for result in all_results:
+            check = ET.SubElement(checks, "check")
+            ET.SubElement(check, "type").text = result.get("type")
+            ET.SubElement(check, "db_type").text = result.get("db_type")
+            results = ET.SubElement(check, "results")
+            for res in result.get("results", []):
+                result_element = ET.SubElement(results, "result")
+                ET.SubElement(result_element, "query").text = res.get("query")
+                ET.SubElement(result_element, "status").text = res.get("status")
+                ET.SubElement(result_element, "message").text = res.get("message")
+        tree = ET.ElementTree(root)
+        report_file = "report.xml"
+        tree.write(report_file, encoding="utf-8", xml_declaration=True)
+        print(f"Report saved to {report_file}")
+
+
 def handle_db_check(config):
-    if os.path.exists(OUTPUT_FILE):
-        with open(OUTPUT_FILE, "r") as f:
-            try:
-                all_results = json.load(f)
-            except json.JSONDecodeError:
-                all_results = []
-    else:
-        all_results = []
-
     db_results = []
-    db_type = config.get("db_type", "unknown")
-
+    db_type = config.get("db_type")
     db_check = DBCheck(config)
     db_check.connect()
 
     if db_check.cur is None:
         db_results.append({
             "status": "Failure",
-            "message": f"Skipping DB [{db_type}] due to failed connection"
+            "message": f"Skipping DB [{db_type}] due to failed connection",
+            "db_type": db_type
         })
     else:
         queries = config.get("queries", [])
         if not isinstance(queries, list):
-            db_results.append({"status": "Failure", "message": "Invalid queries configuration"})
+            db_results.append({
+                "status": "Failure",
+                "message": "Invalid queries configuration",
+                "db_type": db_type
+            })
         else:
             for query_config in queries:
                 if not isinstance(query_config, dict) or 'query' not in query_config:
-                    db_results.append({"status": "Failure", "message": "Invalid query configuration"})
+                    db_results.append({
+                        "status": "Failure",
+                        "message": "Invalid query configuration",
+                        "db_type": db_type
+                    })
                     continue
-
                 query = query_config['query']
-                condition = query_config.get('condition')
-
+                condition = query_config.get("condition")
                 try:
                     rows = db_check.execute_query(query)
                     if rows:
                         output = rows[0][0]
-                        result = JsonOutput().compare_and_generate(output, condition)
+                        result = CompareOutput().compare_and_generate(output, condition)
+                        result["query"] = query
+                        result["db_type"] = db_type
+                        db_results.append(result)
                     else:
-                        result = {"status": "Failure", "message": "Query returned no data"}
-
-                    result["query"] = query
-                    db_results.append(result)
-
+                        db_results.append({
+                            "status": "Failure",
+                            "message": "Query returned no data",
+                            "query": query,
+                            "db_type": db_type
+                        })
                 except Exception as e:
                     db_results.append({
                         "status": "Failure",
                         "message": f"Error executing query: {str(e)}",
-                        "query": query
+                        "query": query,
+                        "db_type": db_type
                     })
-
         db_check.close_connection()
 
-    all_results.append({
+    result_summary = {
         "type": "DBCheck",
         "db_type": db_type,
         "results": db_results
-    })
+    }
 
-    with open(OUTPUT_FILE, "w") as f:
-        json.dump(all_results, f, indent=4)
+    # Reporting
+    app_config = config.get("application", {})
+    report_config = app_config.get("report", {})
+    report_type = report_config.get("format", "").lower()
+    generate_report = report_config.get("generateReport", False)
+
+    output_writer = Output()
+    if generate_report:
+        if report_type == "xml":
+            output_writer.generate_xml_report([result_summary], config)
+        else:
+            output_writer.generate_json_report([result_summary], config)
+    else:
+        output_writer.generate_json_report([result_summary], config)
+
+    return result_summary
