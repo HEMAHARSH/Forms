@@ -258,6 +258,87 @@ def handle_db_check(config):
 
 
 
+def handle_db_check(config, report_format="json"):
+    db_results = []
+    db_type = config.get("db_type")
+
+    db_check = DBCheck(config)
+    db_check.connect()
+
+    if db_check.cur is None:
+        db_results.append({
+            "status": "Failure",
+            "message": f"Skipping DB [{db_type}] due to failed connection",
+            "db_type": db_type
+        })
+    else:
+        queries = config.get("queries", [])
+        if not isinstance(queries, list):
+            db_results.append({
+                "status": "Failure",
+                "message": "Invalid queries configuration",
+                "db_type": db_type
+            })
+        else:
+            for query_config in queries:
+                if not isinstance(query_config, dict) or 'query' not in query_config:
+                    db_results.append({
+                        "status": "Failure",
+                        "message": "Invalid query configuration",
+                        "db_type": db_type
+                    })
+                    continue
+
+                query = query_config['query']
+                condition = query_config.get("condition")
+                try:
+                    rows = db_check.execute_query(query)
+                    if rows:
+                        output = rows[0][0]
+                        result = compareOutput().compare_and_generate(output, condition)
+                        result.update({
+                            "query": query,
+                            "db_type": db_type,
+                            "output": output
+                        })
+                        db_results.append(result)
+                    else:
+                        db_results.append({
+                            "query": query,
+                            "status": "Failure",
+                            "message": "Query returned no data",
+                            "db_type": db_type
+                        })
+                except Exception as e:
+                    db_results.append({
+                        "query": query,
+                        "status": "Failure",
+                        "message": f"Error executing query: {str(e)}",
+                        "db_type": db_type
+                    })
+
+    db_check.close_connection()
+
+    full_result = {
+        "type": "DBCheck",
+        "db_type": db_type,
+        "results": db_results
+    }
+
+    # Report generation
+    generate_report = report_format in ["json", "xml"]
+    if generate_report:
+        json_output = Output()
+        if report_format == "json":
+            json_output.generate_json_report([full_result], config)
+        elif report_format == "xml":
+            json_output.generate_xml_report([full_result], config)
+
+    return full_result
+
+
+
+
 import json
 import xml.etree.ElementTree as ET
 import os
