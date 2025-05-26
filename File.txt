@@ -56,3 +56,272 @@ class Output:
 
 
 handle_db_check(check, report_format=report_format)
+
+
+
+
+
+import os
+import json
+import psycopg2
+import cx_Oracle
+import xml.etree.ElementTree as ET
+from lookupPlugins.getCred import Lookup
+
+aggregated_results = []
+
+class DBConnector:
+    @staticmethod
+    def connect_postgresql(config):
+        username = DBConnector.fetch_credential(config, "username")
+        password = DBConnector.fetch_credential(config, "password")
+        return psycopg2.connect(
+            host=config['db_host'],
+            database=config['db_name'],
+            user=username,
+            password=password
+        )
+
+    @staticmethod
+    def connect_oracle(config):
+        username = DBConnector.fetch_credential(config, "username")
+        password = DBConnector.fetch_credential(config, "password")
+        dsn = f"{config['db_host']}/{config['db_name']}"
+        return cx_Oracle.connect(username, password, dsn)
+
+    @staticmethod
+    def fetch_credential(config, field):
+        credsdata = config.get("credsdata")
+        if credsdata and all(k in credsdata for k in [
+            'credential', 'safe', 'appid', 'cyberark_ca',
+            'cyberark_cred', 'cyberark_key'
+        ]):
+            return Lookup.getCreds(
+                field,
+                credsdata['credential'],
+                credsdata['safe'],
+                credsdata['appid'],
+                credsdata['cyberark_ca'],
+                credsdata['cyberark_cred'],
+                credsdata['cyberark_key']
+            ).decode()
+        return None
+
+class DBCheck:
+    def __init__(self, config):
+        self.config = config
+        self.conn = None
+        self.cur = None
+        self.db_connect_dispatcher = {
+            'postgresql': DBConnector.connect_postgresql,
+            'oracle': DBConnector.connect_oracle
+        }
+
+    def connect(self):
+        db_type = self.config.get('db_type', '').lower()
+        connect_func = self.db_connect_dispatcher.get(db_type)
+        if not connect_func:
+            print(f"Unsupported database type: {db_type}")
+            return
+        try:
+            self.conn = connect_func(self.config)
+            self.cur = self.conn.cursor()
+        except Exception as e:
+            print(f"DB connection failed for {db_type}: {e}")
+            self.conn = None
+            self.cur = None
+
+    def execute_query(self, query):
+        try:
+            self.cur.execute(query)
+            return self.cur.fetchall()
+        except Exception as e:
+            print(f"Error executing query: {e}")
+            return None
+
+    def close_connection(self):
+        if self.cur:
+            self.cur.close()
+        if self.conn:
+            self.conn.close()
+
+class CompareOutput:
+    def __init__(self):
+        self.operator_map = {
+            ">": self.greater,
+            "<": self.lesser,
+            "==": self.equal,
+            ">=": self.greater_equal,
+            "<=": self.lesser_equal
+        }
+
+    def greater(self, output, value):
+        return output > value, f"Database row count is {output} and greater than {value}"
+
+    def lesser(self, output, value):
+        return output < value, f"Database row count is {output} and less than {value}"
+
+    def equal(self, output, value):
+        return output == value, f"Database row count is {output} and equal to {value}"
+
+    def greater_equal(self, output, value):
+        return output >= value, f"Database row count is {output} and greater than or equal to {value}"
+
+    def lesser_equal(self, output, value):
+        return output <= value, f"Database row count is {output} and less than or equal to {value}"
+
+    def compare_and_generate(self, output, count_expr):
+        if count_expr is None:
+            return {
+                "output": output,
+                "status": "Success",
+                "message": "No count condition provided"
+            }
+
+        parts = count_expr.strip().split()
+        if len(parts) != 2:
+            return {
+                "output": output,
+                "status": "Failure",
+                "message": "Invalid count expression format"
+            }
+
+        operator, value_str = parts
+        try:
+            value = int(value_str)
+        except ValueError:
+            return {
+                "output": output,
+                "status": "Failure",
+                "message": f"Invalid value for comparison: {value_str}"
+            }
+
+        func = self.operator_map.get(operator)
+        if not func:
+            return {
+                "output": output,
+                "status": "Failure",
+                "message": f"Unsupported operator: {operator}"
+            }
+
+        success, message = func(output, value)
+        return {
+            "output": output,
+            "status": "Success" if success else "Failure",
+            "message": message
+        }
+
+class Output:
+    _report_written = False
+
+    def generate_json_report(self, all_results, config):
+        report = {
+            "report": {
+                "checks": all_results
+            }
+        }
+        with open("report.json", "w") as f:
+            json.dump(report, f, indent=4)
+        print("Report saved to report.json")
+
+    def generate_xml_report(self, all_results, config):
+        root = ET.Element("report")
+        checks = ET.SubElement(root, "checks")
+        for result in all_results:
+            check = ET.SubElement(checks, "check")
+            ET.SubElement(check, "type").text = result.get("type")
+            ET.SubElement(check, "db_type").text = result.get("db_type")
+            results = ET.SubElement(check, "results")
+            for res in result.get("results", []):
+                result_elem = ET.SubElement(results, "result")
+                ET.SubElement(result_elem, "query").text = res.get("query")
+                ET.SubElement(result_elem, "status").text = res.get("status")
+                ET.SubElement(result_elem, "message").text = res.get("message")
+        tree = ET.ElementTree(root)
+        tree.write("report.xml", encoding="utf-8", xml_declaration=True)
+        print("Report saved to report.xml")
+
+    @classmethod
+    def defer_report(cls, all_results, config, report_format):
+        if cls._report_written:
+            return
+        cls._report_written = True
+        output = Output()
+        if report_format == "json":
+            output.generate_json_report(all_results, config)
+        elif report_format == "xml":
+            output.generate_xml_report(all_results, config)
+        else:
+            print("Invalid output type. Supported types are 'json' and 'xml'. Defaulting to JSON.")
+            output.generate_json_report(all_results, config)
+
+def handle_db_check(config, report_format="json", generate_report=True):
+    db_results = []
+    db_type = config.get("db_type")
+    db_check = DBCheck(config)
+    db_check.connect()
+
+    if db_check.cur is None:
+        db_results.append({
+            "status": "Failure",
+            "message": f"Skipping DB [{db_type}] due to failed connection",
+            "db_type": db_type
+        })
+    else:
+        queries = config.get("queries", [])
+        if not isinstance(queries, list):
+            db_results.append({
+                "status": "Failure",
+                "message": "Invalid queries configuration",
+                "db_type": db_type
+            })
+        else:
+            for query_config in queries:
+                if not isinstance(query_config, dict) or 'query' not in query_config:
+                    db_results.append({
+                        "status": "Failure",
+                        "message": "Invalid query configuration",
+                        "db_type": db_type
+                    })
+                    continue
+
+                query = query_config['query']
+                condition = query_config.get("condition")
+
+                try:
+                    rows = db_check.execute_query(query)
+                    if rows:
+                        output = rows[0][0]
+                        result = CompareOutput().compare_and_generate(output, condition)
+                        result.update({"query": query, "db_type": db_type})
+                    else:
+                        result = {
+                            "status": "Failure",
+                            "message": "Query returned no data",
+                            "query": query,
+                            "db_type": db_type
+                        }
+                except Exception as e:
+                    result = {
+                        "status": "Failure",
+                        "message": f"Error executing query: {str(e)}",
+                        "query": query,
+                        "db_type": db_type
+                    }
+
+                db_results.append(result)
+
+    db_check.close_connection()
+
+    check_result = {
+        "type": "DBCheck",
+        "db_type": db_type,
+        "results": db_results
+    }
+
+    aggregated_results.append(check_result)
+
+    if generate_report:
+        Output.defer_report(aggregated_results, config, report_format)
+
+    return check_result
