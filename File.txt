@@ -1,36 +1,85 @@
-import xml.etree.ElementTree as ET
-from xml.dom import minidom
+import json import os import xml.etree.ElementTree as ET from urllib.parse import urlparse from scripts.lookupPlugins.urlscanner import URLChecker
 
-class Output:
-    def generate_json_report(self, all_results, config):
-        report = {"report": {"checks": all_results}}
-        report_file = "report.json"
-        with open(report_file, "w") as f:
-            json.dump(report, f, indent=4)
-        print(f"Report saved to {report_file}")
+class Output: def generate_json_report(self, all_results, report_file="report.json"): if os.path.exists(report_file): with open(report_file, "r") as f: try: existing_report = json.load(f) except json.JSONDecodeError: existing_report = {"report": {"checks": []}} else: existing_report = {"report": {"checks": []}}
 
-    def generate_xml_report(self, all_results, config):
+existing_report["report"]["checks"].append(all_results)
+
+    with open(report_file, "w") as f:
+        json.dump(existing_report, f, indent=4)
+
+    print(f"Report saved to {report_file}")
+
+def generate_xml_report(self, all_results, report_file="report.xml"):
+    if os.path.exists(report_file):
+        tree = ET.parse(report_file)
+        root = tree.getroot()
+    else:
         root = ET.Element("report")
-        checks = ET.SubElement(root, "checks")
+        tree = ET.ElementTree(root)
 
-        for result in all_results:
-            check = ET.SubElement(checks, "check")
-            ET.SubElement(check, "type").text = result.get("type")
-            ET.SubElement(check, "db_type").text = result.get("db_type")
+    check = ET.SubElement(root, "check")
+    ET.SubElement(check, "type").text = all_results.get("type")
+    results = ET.SubElement(check, "results")
 
-            results = ET.SubElement(check, "results")
-            for res in result.get("results", []):
-                result_element = ET.SubElement(results, "result")
-                ET.SubElement(result_element, "query").text = res.get("query")
-                ET.SubElement(result_element, "status").text = res.get("status")
-                ET.SubElement(result_element, "message").text = res.get("message")
+    for res in all_results.get("results", []):
+        result_element = ET.SubElement(results, "result")
+        for k, v in res.items():
+            ET.SubElement(result_element, k).text = str(v)
 
-        # Pretty-print the XML
-        xml_str = ET.tostring(root, encoding="utf-8")
-        pretty_xml = minidom.parseString(xml_str).toprettyxml(indent="  ")
+    tree.write(report_file, encoding="utf-8", xml_declaration=True)
+    print(f"Report saved to {report_file}")
 
-        report_file = "report.xml"
-        with open(report_file, "w", encoding="utf-8") as f:
-            f.write(pretty_xml)
+def handle_url_check(config, report_format="json", generate_report=True): checker = URLChecker(config) results = checker.run()
 
-        print(f"Report saved to {report_file}")
+output = []
+for res in results:
+    result = {}
+    result["url"] = f"{res['url']}"
+    result["expected"] = f"{res.get('expected')} | Status: {res.get('status', 'N/A')}"
+    result["success"] = f"{res['success']}"
+    result["message"] = f"{res['message']}"
+
+    if 'xpath_valid' in res and res['xpath_valid'] is not None:
+        result["xpath_valid"] = f"{res['xpath_valid']}, Xpath locates the element"
+    elif 'xpath_valid' in res and res['xpath_valid'] is None:
+        result["xpath_check"] = "Not performed (no XPath provided)"
+    else:
+        result["xpath_check"] = "Not performed (error occurred)"
+
+    if 'xpath_element' in res and res['xpath_element'] is not None:
+        xpath_value = res['xpath_element']
+        if isinstance(xpath_value, dict):
+            result["element_tag_name"] = f"{xpath_value['element_name']}"
+            result["element_value"] = f"{xpath_value['element_html']}"
+
+            if 'value' in config and config['value'] is not None:
+                result["expected_xpath_value"] = f"{config['value']}"
+                if config['value'] in xpath_value['element_html']:
+                    result["xpath_value_match"] = f"Success Xpath Value Matched -> {config['value']}"
+                else:
+                    result["xpath_value_match"] = f"Failure: Xpath element value retrieved -> {xpath_value['element_html']}"
+        else:
+            result["xpath_element"] = f"XPath Element: {xpath_value}"
+    elif 'xpath_element' in res and res['xpath_element'] is None:
+        result["xpath_element"] = "XPath Element: Not found (no XPath provided or element not found)"
+    else:
+        result["xpath_element"] = "XPath Element: Not available (error occurred)"
+
+    output.append(result)
+
+all_results = {
+    "type": "URLCheck",
+    "results": output
+}
+
+if generate_report:
+    reporter = Output()
+    if report_format.lower() == "json":
+        reporter.generate_json_report(all_results)
+    elif report_format.lower() == "xml":
+        reporter.generate_xml_report(all_results)
+    else:
+        print("Invalid report format. Supported formats are 'json' and 'xml'.")
+
+print(json.dumps(output, indent=4))
+
