@@ -254,3 +254,68 @@ def handle_db_check(config):
         output_writer.generate_json_report([result_summary], config)
 
     return result_summary
+
+
+
+
+import json
+import xml.etree.ElementTree as ET
+import os
+import yaml  # Assuming you have PyYAML installed
+
+from scripts.dbchecks import handle_db_check
+
+def load_yaml(path):
+    try:
+        with open(path, "r") as file:
+            return yaml.safe_load(file)
+    except FileNotFoundError:
+        print("The YAML file was not found.")
+        return None
+
+def dispatch_check(check, report_format=None):
+    check_type = check.get("type")
+    check_handlers = {
+        "DBCheck": handle_db_check,
+    }
+    handler = check_handlers.get(check_type)
+    if handler:
+        handler(check, report_format=report_format)
+    else:
+        print(f"Unsupported check type: {check_type}")
+
+def main():
+    config = load_yaml("config.yaml")
+    if not config:
+        return
+
+    app_config = config.get("application", {})
+    report_config = app_config.get("report", {})
+    report_format = report_config.get("format", "json").lower() if report_config.get("generateReport", True) else "json"
+
+    checks = app_config.get("checks", [])
+    for check in checks:
+        dispatch_check(check, report_format=report_format)
+
+if __name__ == "__main__":
+    main()
+
+
+
+def handle_db_check(config, report_format="json"):
+    ...
+    # Replace this line:
+    # report_config = (config.get("application", {})).get("report", {})
+    # report_type = report_config.get("format", "")
+    # generate_report = report_config.get("generateReport", True)
+
+    generate_report = report_format in ["json", "xml"]
+    
+    json_output = Output()
+
+    if report_format == "json" and generate_report:
+        json_output.generate_json_report(db_results, config)
+    elif report_format == "xml" and generate_report:
+        json_output.generate_xml_report(db_results, config)
+    else:
+        print("Invalid output type. Supported types are 'json' and 'xml'.")
