@@ -1,0 +1,258 @@
+from jinja2 import Template
+
+def get_status_style(status, color_map):
+    status = status.capitalize()
+    bg = color_map.get(status, "#ffffff")
+    text_color = {
+        "Success": "#155724",
+        "Failure": "#721c24",
+        "Partial": "#856404",
+        "Unknown": "#333"
+    }.get(status, "#333")
+    return f"background-color: {bg}; color: {text_color}; font-weight: bold;"
+
+
+def main():
+    config = load_yaml("config.yaml")
+    if not config:
+        return
+
+    app = validate_config(config)
+    if not app:
+        print("Config is invalid.. Check the Validation error")
+        return
+
+    print("Config is valid")
+    app_config = config.get("application", {})
+    checks = app_config.get("checks", [])
+    all_results = []
+
+    for check in checks:
+        result = dispatch_check(check)
+        if result:
+            all_results.append(result)
+
+    report_type = app_config.get("report", {}).get("format")
+    report_type = report_type.lower() if report_type else "html"
+    generate_report = app_config.get("report", {}).get("generateReport", True)
+
+    reporter = Output()
+    report_data = reporter.generate_json_report(all_results, config)
+
+    color_map = {
+        "Success": "#d4edda",
+        "Failure": "#f8d7da",
+        "Partial": "#ffff99",
+        "Unknown": "#6c757d"
+    }
+    report_data["color_map"] = color_map
+
+    if generate_report:
+        if report_type == "json":
+            filename = "json_report.json"
+            with open(filename, 'w') as f:
+                json.dump(report_data, f, indent=4)
+            print(f"{filename} has been generated.")
+            upload_report_to_artifactory(app_config, filename)
+
+        elif report_type == "xml":
+            filename = "xml_report.xml"
+            xml_data = dicttoxml.dicttoxml(report_data, attr_type=False)
+            xml_doc = minidom.parseString(xml_data)
+            pretty_xml = xml_doc.toprettyxml()
+            with open(filename, 'w') as f:
+                f.write(pretty_xml)
+            print(f"{filename} has been generated.")
+            upload_report_to_artifactory(app_config, filename)
+
+        elif report_type in ["html", "html-failure"]:
+            template_filename = "template_failure.html" if report_type == "html-failure" else "template.html"
+            filename = "html_report.html"
+
+            check_type_counts = {
+                "URLCheck": {"total": 0, "passed": 0, "failed": 0},
+                "DBCheck": {"total": 0, "passed": 0, "failed": 0},
+                "WindowsCheck": {"total": 0, "passed": 0, "failed": 0},
+                "LinuxCheck": {"total": 0, "passed": 0, "failed": 0}
+            }
+
+            for check in report_data['report']['checks']:
+                check_type = check['type']
+                if check_type in check_type_counts:
+                    if check_type in ["URLCheck", "DBCheck"]:
+                        results = check.get('results', [])
+                        for result in results:
+                            check_type_counts[check_type]["total"] += 1
+                            status_field = 'success' if check_type == "URLCheck" else 'status'
+                            if result.get(status_field) == 'Success':
+                                check_type_counts[check_type]["passed"] += 1
+                            else:
+                                check_type_counts[check_type]["failed"] += 1
+                    else:
+                        commands = check.get('commands', [])
+                        for command in commands:
+                            check_type_counts[check_type]["total"] += 1
+                            if command.get('status') == 'Success':
+                                check_type_counts[check_type]["passed"] += 1
+                            else:
+                                check_type_counts[check_type]["failed"] += 1
+
+            report_data['total_checks'] = sum(v['total'] for v in check_type_counts.values())
+            report_data['passed_checks'] = sum(v['passed'] for v in check_type_counts.values())
+            report_data['failed_checks'] = sum(v['failed'] for v in check_type_counts.values())
+            report_data['check_type_counts'] = check_type_counts
+
+            with open(template_filename, 'r') as f:
+                template = Template(f.read())
+
+            html_output = template.render(data=report_data, get_status_style=get_status_style)
+
+            with open(filename, 'w') as f:
+                f.write(html_output)
+            print(f"{filename} has been generated.")
+
+            upload_report_to_artifactory(app_config, filename)
+
+        else:
+            print("Invalid report type")
+    else:
+        print("Json Output:")
+        print(report_data)
+
+
+
+
+
+
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <title>Health Check Report</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            color: #333;
+            padding: 20px;
+            background-color: #ffffff;
+        }
+        h1, h2 {
+            text-align: center;
+            color: #04771d;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            font-size: 15px;
+        }
+        th, td {
+            padding: 10px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+        th {
+            background-color: #003300;
+            color: white;
+        }
+        tr:nth-child(even) {
+            background-color: #f2f2f2;
+        }
+        .summary-passed {
+            color: #28a745;
+            font-weight: bold;
+        }
+        .summary-failed {
+            color: #dc3545;
+            font-weight: bold;
+        }
+        #date-time {
+            font-size: 12px;
+            color: #6c757d;
+            text-align: right;
+            margin-bottom: 10px;
+        }
+    </style>
+</head>
+<body>
+
+<div id="date-time">
+    <script>document.write(new Date().toLocaleString())</script>
+</div>
+
+<h1>Health Check Report</h1>
+
+<h2>Summary</h2>
+<table>
+    <tr>
+        <th>Total</th>
+        <th>Passed</th>
+        <th>Failed</th>
+    </tr>
+    <tr>
+        <td>{{ data.total_checks }}</td>
+        <td class="summary-passed">{{ data.passed_checks }}</td>
+        <td class="summary-failed">{{ data.failed_checks }}</td>
+    </tr>
+</table>
+
+<h2>Detailed Status of Checks</h2>
+<table>
+    <tr>
+        <th>Check Type</th>
+        <th>Total</th>
+        <th>Passed</th>
+        <th>Failed</th>
+        <th>Status</th>
+    </tr>
+    {% for check_type, counts in data.check_type_counts.items() %}
+    <tr>
+        <td>{{ check_type }}</td>
+        <td>{{ counts.total }}</td>
+        <td>{{ counts.passed }}</td>
+        <td>{{ counts.failed }}</td>
+        <td style="{{ get_status_style('Success' if counts.failed == 0 else 'Failure', data.color_map) }}">
+            {% if counts.failed == 0 %}
+                All passed
+            {% else %}
+                {{ counts.failed }} failed
+            {% endif %}
+        </td>
+    </tr>
+    {% endfor %}
+</table>
+
+{% for check in data.report.checks %}
+    <h2>{{ check.type }} Results</h2>
+    <table>
+        <tr>
+            <th>Check Name</th>
+            <th>Description</th>
+            <th>Status</th>
+            <th>Message</th>
+            <th>URL</th>
+            <th>Expected Status Code</th>
+            <th>Actual Status Code</th>
+            <th>XPath Valid</th>
+            <th>Expected XPath Value</th>
+            <th>XPath Value Match</th>
+        </tr>
+        {% for result in check.results %}
+        <tr>
+            <td>{{ result.checkname }}</td>
+            <td>{{ result.description }}</td>
+            <td style="{{ get_status_style(result.success, data.color_map) }}">{{ result.success }}</td>
+            <td>{{ result.message }}</td>
+            <td>{{ result.url }}</td>
+            <td>{{ result.expected }}</td>
+            <td>{{ result.actual_status }}</td>
+            <td>{{ result.xpath_valid }}</td>
+            <td>{{ result.expected_xpath_value }}</td>
+            <td>{{ result.xpath_value_match }}</td>
+        </tr>
+        {% endfor %}
+    </table>
+{% endfor %}
+
+</body>
+</html>
